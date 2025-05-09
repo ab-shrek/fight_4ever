@@ -36,17 +36,24 @@ public class SceneBuilder : MonoBehaviour
         // Create enclosing walls
         CreateEnclosingWalls();
 
-        // Create cover walls
-        // Center cover
-        CreateCover(new Vector3(0, 2, 0), new Vector3(1f, 4, 6), "CenterCover");
-        
-        // Left side cover
-        CreateCover(new Vector3(-8, 2, 4), new Vector3(1f, 4, 4), "LeftCover1");
-        CreateCover(new Vector3(-8, 2, -4), new Vector3(1f, 4, 4), "LeftCover2");
-        
-        // Right side cover
-        CreateCover(new Vector3(8, 2, 4), new Vector3(1f, 4, 4), "RightCover1");
-        CreateCover(new Vector3(8, 2, -4), new Vector3(1f, 4, 4), "RightCover2");
+        // Check MAP_TYPE environment variable for cover creation
+        string mapTypeEnv = System.Environment.GetEnvironmentVariable("MAP_TYPE");
+        if (string.IsNullOrEmpty(mapTypeEnv) || mapTypeEnv.ToLower() == "default")
+        {
+            Debug.Log("[SceneBuilder] MAP_TYPE is 'default' or not set: No covers will be created.");
+        }
+        else
+        {
+            Debug.Log($"[SceneBuilder] MAP_TYPE is '{mapTypeEnv}': Creating covers.");
+            // Center cover
+            CreateCover(new Vector3(0, 2, 0), new Vector3(1f, 4, 6), "CenterCover");
+            // Left side cover
+            CreateCover(new Vector3(-8, 2, 4), new Vector3(1f, 4, 4), "LeftCover1");
+            CreateCover(new Vector3(-8, 2, -4), new Vector3(1f, 4, 4), "LeftCover2");
+            // Right side cover
+            CreateCover(new Vector3(8, 2, 4), new Vector3(1f, 4, 4), "RightCover1");
+            CreateCover(new Vector3(8, 2, -4), new Vector3(1f, 4, 4), "RightCover2");
+        }
 
         // Players - spawning behind walls, facing towards center
         var player1 = CreatePlayer(new Vector3(-13, 1, 4), Quaternion.Euler(0, 0, 0), "Player_1", Color.blue);

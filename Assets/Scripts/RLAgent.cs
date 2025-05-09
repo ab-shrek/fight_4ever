@@ -35,6 +35,8 @@ public class RLAgent : Agent
     private NetworkStream stream;
     private bool isConnected = false;
     private bool isConnecting = false;
+    private float lastConnectionAttempt = 0f;
+    private float connectionRetryInterval = 5f; // Retry connection every 5 seconds
     private Rigidbody rb;
     private AIShooting shooting;
     public RLAgent opponentAgent;
@@ -46,6 +48,8 @@ public class RLAgent : Agent
     private float lastPositionTime;
     private float positionCheckInterval = 1f; // Check position every second
     private HashSet<Vector2Int> visitedPositions = new HashSet<Vector2Int>();
+    private double lastServerRequestTimestamp = 0;
+    private string instanceId;
 
     protected override void Awake()
     {
@@ -99,6 +103,8 @@ public class RLAgent : Agent
             Log("Requesting initial decision");
             RequestDecision();
             Log("Start method completed");
+
+            instanceId = System.Environment.GetEnvironmentVariable("INSTANCE_ID") ?? gameObject.name;
         }
         catch (Exception e)
         {
@@ -108,10 +114,19 @@ public class RLAgent : Agent
 
     private void Update()
     {
-        if (useRemoteTraining && isConnected)
+        if (useRemoteTraining)
         {
             float currentTime = Time.time;
-            if (currentTime - lastRequestTime >= requestInterval)
+            
+            // Check connection status and attempt reconnection if needed
+            if (!isConnected && !isConnecting && currentTime - lastConnectionAttempt >= connectionRetryInterval)
+            {
+                Log("Connection lost, attempting to reconnect");
+                int port = isPlayerOne ? 5000 : 5001;
+                _ = ConnectToTrainingServer(port);
+            }
+
+            if (isConnected && currentTime - lastRequestTime >= requestInterval)
             {
                 Log($"Update calling SendObservationsAndGetActions - Time: {currentTime}, Frame: {Time.frameCount}, Client Connected: {client?.Connected}");
                 SendObservationsAndGetActions();
@@ -132,13 +147,22 @@ public class RLAgent : Agent
 
     private async Task ConnectToTrainingServer(int port)
     {
-        if (isConnecting || isConnected)
+        if (isConnecting)
         {
-            Log("Already connected or connecting, skipping connection attempt");
+            Log("Already attempting to connect, skipping connection attempt");
+            return;
+        }
+
+        float currentTime = Time.time;
+        if (currentTime - lastConnectionAttempt < connectionRetryInterval)
+        {
+            Log("Too soon to retry connection");
             return;
         }
 
         isConnecting = true;
+        lastConnectionAttempt = currentTime;
+
         try
         {
             Log($"Connecting to training server on port {port}...");
@@ -204,6 +228,7 @@ public class RLAgent : Agent
             sensor.AddObservation(0f); // Default opponent x position
             sensor.AddObservation(0f); // Default opponent z position
         }
+        // Do NOT add instanceId here (must be float)
     }
 
     public override void OnActionReceived(ActionBuffers actions)
@@ -273,7 +298,8 @@ public class RLAgent : Agent
                 { "health", healthSystem != null ? healthSystem.GetHealthPercentage() : 1f },
                 { "position", new float[] { transform.position.x / 15f, transform.position.z / 10f } },
                 { "opponent_health", opponentAgent?.healthSystem != null ? opponentAgent.healthSystem.GetHealthPercentage() : 1f },
-                { "opponent_position", opponentAgent != null ? new float[] { opponentAgent.transform.position.x / 15f, opponentAgent.transform.position.z / 10f } : new float[] { 0, 0 } }
+                { "opponent_position", opponentAgent != null ? new float[] { opponentAgent.transform.position.x / 15f, opponentAgent.transform.position.z / 10f } : new float[] { 0, 0 } },
+                { "instance_id", instanceId }
             };
 
             Log($"Sending observation: {JsonConvert.SerializeObject(observation)}");
@@ -287,6 +313,9 @@ public class RLAgent : Agent
                 await ConnectToTrainingServer(port);
                 if (!isConnected) return;
             }
+
+            // Before sending observation
+            lastServerRequestTimestamp = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds;
 
             // Serialize and send observation
             string jsonObservation = JsonConvert.SerializeObject(observation);
@@ -349,6 +378,11 @@ public class RLAgent : Agent
                 Log("Shooting!");
                 shooting.Shoot();
             }
+
+            // After receiving response
+            double now = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds;
+            double lagMs = now - lastServerRequestTimestamp;
+            Log($"Server response lag: {lagMs} ms | Instance: {instanceId}");
         }
         catch (Exception e)
         {
@@ -363,10 +397,10 @@ public class RLAgent : Agent
     {
         if (rb != null)
         {
-            // Generate random movement direction
+            // Generate random movement direction with increased magnitude
             float randomX = UnityEngine.Random.Range(-1f, 1f);
             float randomZ = UnityEngine.Random.Range(-1f, 1f);
-            Vector3 move = new Vector3(randomX, 0, randomZ) * 5f * Time.deltaTime;
+            Vector3 move = new Vector3(randomX, 0, randomZ) * 10f * Time.deltaTime; // Increased movement speed
             
             Vector3 newPosition = transform.position + move;
             // Check if new position would be valid
@@ -381,9 +415,27 @@ public class RLAgent : Agent
             }
             else
             {
-                // Small penalty for trying to move into a wall
-                AddReward(-0.01f);
-                Log($"WARNING: Blocked random movement into wall. Current position: {transform.position}, Attempted position: {newPosition}, Move vector: {move}");
+                // Try a different random direction if blocked
+                randomX = UnityEngine.Random.Range(-1f, 1f);
+                randomZ = UnityEngine.Random.Range(-1f, 1f);
+                move = new Vector3(randomX, 0, randomZ) * 10f * Time.deltaTime;
+                newPosition = transform.position + move;
+                
+                if (IsValidPosition(newPosition))
+                {
+                    rb.MovePosition(newPosition);
+                    Log($"Applied alternative random movement: {move}, New position: {newPosition}");
+                    if (move != Vector3.zero)
+                    {
+                        transform.rotation = Quaternion.LookRotation(move);
+                    }
+                }
+                else
+                {
+                    // Small penalty for being stuck
+                    AddReward(-0.01f);
+                    Log($"WARNING: Blocked movement in both directions. Current position: {transform.position}");
+                }
             }
 
             // Random shooting (50% chance)
