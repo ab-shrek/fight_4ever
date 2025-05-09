@@ -1,0 +1,89 @@
+THE BASICS: 
+Albert and Kai were trained using reinforcement learning, meaning they were rewarded for doing things correctly and punished for doing them incorrectly (the reward is just increasing their score, and the punishment is decreasing it). After they finish each attempt, the actions they took are analyzed and the weights in their neural networks (brains) are adjusted using an algorithm called MA-POCA to try to prioritize the actions that led to the most reward. The agents start off making essentially random decisions until Kai accidentally tags Albert in the first room and is rewarded, then, as mentioned above, the weights in his neural network brain are adjusted in order to try to replicate that reward (it wasn't this simple for this video since we use self-play to train both agents at the same time, more on that later). This leads to Kai learning that tagging Albert is good, and since Albert is punished when he's tagged, it also leads to Albert learning that getting tagged by Kai isn't good. This process continues through 10s of millions of steps until one of the agents consistently loses, or the agents are able to counter each other well enough to where it's a draw.
+
+
+REWARD FUNCTION: 
+Albert and Kai are given two types of rewards, group rewards and individual rewards. When Albert gets tagged he's punished by getting a -1 group reward and Kai is rewarded by getting a +1 group reward and vice versa, encouraging Kai to tag Albert, and Albert to avoid being tagged by Kai. Additionally, Albert is given an individual reward of 0.001 for each frame he's alive (0.6 total in a room lasting 10s), and Kai -0.001, to encourage Kai to try to tag Albert as quickly as possible. When we introduce the grabbable cubes we also give Albert an individual reward of +1 the first time he picks up the cube to make sure Albert actually starts using the cube (since without this, the rewards were too infrequent for Albert to learn to use it effectively).
+
+
+BRAIN: 
+Albert and Kai's brains are neural networks with 4 layers each (one input layer, 2 hidden layers and one output layer).
+
+The agents collect information about the scene through direct values and raycasts. Every 5 frames they're fed data about their position in the room, the opponent's position, velocity, direction etc., and they also collect information through raycasts (a simplified version of eyes). The agent's eyes (raycasts) can differentiate between walls, ground, moveableObjects and Kai/Albert.
+
+The agents' brains (neural networks) are given the data the agents collect from direct values and raycasts and use them to predict 4 numbers for the respective agent which control how that agent moves. An example of an output of one of the neural networks is: [1, 2, 0, 1], this would be interpreted as [1=move forward, 2=turn right, 0=don't jump, 1=try to grab], so the agent being controlled by this neural network would try to move forward while turning right and grabbing.
+
+The fact that we have two agents training simultaneously complicates things a bit, normally we're able just update the agents brains every x steps, but if we did that for both brains at the same time then they would struggle developing multiple strategies, since reinforcement learning tends to be best at finding a single solution, that would lead to the winner dominating and the loser stuck doing the same strategy over and over. The way we tackle this issue is by using something called self-play. Since we use self-play, we technically only train one agent at a time, and swap which is being trained every 100k steps. When we're training Albert, we use a recent model of Kai's brain as his opponent, and to avoid there only being one strategy, we store 10 recent brains to use as opponents, swapping them out every couple thousand steps so that Albert learns to beat all of them and not just one. This results in a much more general AI that's hard to exploit.
+
+
+UNEXPECTED BEHAVIORS:
+In room 1 Albert manages to break out of the room by exploiting a small hole in the hitbox near the top of the room, which was there because I didn't make the hitboxes on the walls tall enough. Though Albert used it to escape, I'm not convinced he actually would learn to do it consistently. The challenge with this video is that it can be difficult to interpret the agent's behaviors; Albert could be making certain unexpected moves as a way to exploit Kai's poorly trained brain to get him to make bad moves, or Albert could just be making these unexpected moves because he hasn't trained enough. Albert was able to find the hole a few times, however he wasn't able to do it consistently, this could be from either him not training long enough, his observations not making it easy to detect when he can jump out, or Kai quickly learning to counter him getting to the display in time.
+
+In room 2 Albert also manages to glitch out of the room, and he was able to do this consistently. We made sure the cube grabbing functionality was coded as rigorously as possible, even with it automatically detaching the grab if the force exerted is too high, I couldn't find a single way of exploiting it in testing, but Albert certainly didn't have issues finding it.
+
+Albert also had a couple moments of throwing the cubes at Kai and spinning with the cube to throw Kai out of the room, we didn't even consider this being a possibility before training, AI's able to come up with some really clever solutions to problems.
+
+
+can u understand this? and figure out what they used to make the players learn?
+
+---
+# Unity ML-Agents Remote Training Workflow (GPU VM)
+
+## 1. Develop Locally in Unity
+- Build your game and agent logic in the Unity Editor on your local machine (Mac/Windows/Linux).
+- Add ML-Agents package and set up your Agent scripts and Behavior Parameters as usual.
+
+## 2. Build a Headless Unity Environment
+- In Unity, go to `File > Build Settings`.
+- Select your training scene.
+- Set the platform to **Linux** (recommended for most VMs; use Mac/Windows if your VM requires it).
+- Enable **Headless Mode** (no graphics, just simulation) if available.
+- Build the project. This will produce a file like `YourUnityEnv.x86_64` (Linux) or similar for your OS.
+- Zip the build output for transfer.
+
+## 3. Transfer the Build to the GPU VM
+- Use `scp`, `rsync`, or your preferred file transfer method to copy the Unity build to your remote VM.
+  ```sh
+  scp -r ./BuildFolder user@remote-vm:/path/to/destination
+  ```
+
+## 4. Set Up Python & ML-Agents on the VM
+- SSH into your VM.
+- Install Python 3.9 (if not already installed).
+- Create and activate a virtual environment:
+  ```sh
+  python3.9 -m venv mlagents-env
+  source mlagents-env/bin/activate
+  ```
+- Install dependencies:
+  ```sh
+  pip install --upgrade pip
+  pip install torch==1.11.0 numpy==1.21.2 mlagents tensorboard
+  ```
+- Place your ML-Agents YAML config file (e.g., `config.yaml`) on the VM.
+
+## 5. Run Training on the VM (with GPU)
+- Start training by running:
+  ```sh
+  mlagents-learn config.yaml --run-id=run1 --env=./YourUnityEnv.x86_64
+  ```
+- The Unity executable will simulate the environment; the Python process will use the GPU for RL training.
+- Monitor training with TensorBoard:
+  ```sh
+  tensorboard --logdir results
+  ```
+
+## 6. Retrieve the Trained Model
+- After training, download the exported `.onnx` model from the VM to your local machine.
+- Example:
+  ```sh
+  scp user@remote-vm:/path/to/results/run1/YourAgent.onnx ./
+  ```
+
+## 7. Use the Model in Your Unity Project
+- Place the `.onnx` file in your Unity project's `Assets` folder.
+- Assign it to your agent's `Behavior Parameters` in the Unity Editor.
+- Set Behavior Type to **Inference Only**.
+- Build your final game for any platform—no Python or ML-Agents needed at runtime.
+
+---
