@@ -2,7 +2,10 @@
 
 # Usage: ./run_game_instances.sh [NUM_INSTANCES]
 NUM_INSTANCES=${1:-3}
-GAME_PATH="/Users/mario/fight_4ever/Build/Fight4Ever.app/Contents/MacOS/fight_4ever"
+# GAME_PATH="$(pwd)/Fight4Ever.app/Contents/MacOS/fight_4ever"
+
+
+GAME_PATH="$(pwd)/Fight4Ever.x86_64"
 LOG_DIR="logs"
 MAP_TYPES=(default)
 

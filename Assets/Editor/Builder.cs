@@ -1,5 +1,6 @@
 using UnityEditor;
 using UnityEngine;
+using System.IO;
 
 public class Builder
 {
@@ -17,6 +18,28 @@ public class Builder
             EditorBuildSettings.scenes,
             System.IO.Path.Combine(buildPath, "Fight4Ever.app"),
             BuildTarget.StandaloneOSX,
+            BuildOptions.None
+        );
+    }
+
+    public static void BuildMac()
+    {
+        string buildPath = Directory.GetCurrentDirectory();
+        BuildPipeline.BuildPlayer(
+            EditorBuildSettings.scenes,
+            Path.Combine(buildPath, "Fight4Ever.app"),
+            BuildTarget.StandaloneOSX,
+            BuildOptions.None
+        );
+    }
+
+    public static void BuildLinux()
+    {
+        string buildPath = Directory.GetCurrentDirectory();
+        BuildPipeline.BuildPlayer(
+            EditorBuildSettings.scenes,
+            Path.Combine(buildPath, "Fight4Ever.x86_64"),
+            BuildTarget.StandaloneLinux64,
             BuildOptions.None
         );
     }

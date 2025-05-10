@@ -69,22 +69,14 @@ public class RLAgent : Agent
     {
         try
         {
-            // Test write first
-            // string testPath = Path.Combine("/Users/mario/fight_4ever", "training", "build", "logs", "test.txt");
-            // File.WriteAllText(testPath, "test");
-            
-            // Initialize logging
-            string logPath = Path.Combine("/Users/mario/fight_4ever", "training", "build", "logs");
-            
+            // Use a relative path for logs directory
+            string logPath = Path.Combine(Application.dataPath, "../training/build/logs");
+            Directory.CreateDirectory(logPath);
             // Create new log file with player name
             string logFile = Path.Combine(logPath, $"agent_{gameObject.name}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
             this.logFile = new StreamWriter(logFile, true);
+            // Only log after logFile is assigned
             Log($"Log file created at: {logFile}");
-
-            // Initialize components
-            rb = GetComponent<Rigidbody>();
-            shooting = GetComponent<AIShooting>();
-            healthSystem = GetComponent<HealthSystem>();
             Log("Components initialized");
 
             if (useRemoteTraining)
@@ -114,6 +106,7 @@ public class RLAgent : Agent
 
     private void Update()
     {
+        if (logFile == null) return;
         if (useRemoteTraining)
         {
             float currentTime = Time.time;
@@ -480,14 +473,44 @@ public class RLAgent : Agent
             client?.Close();
         }
         logFile?.Close();
+        logFile = null;
     }
 
     private void Log(string message)
     {
-        string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-        string logMessage = $"[{timestamp}] [{gameObject.name}] {message}";
-        logFile.WriteLine(logMessage);
-        logFile.Flush();
+        try
+        {
+            if (logFile == null)
+            {
+                Debug.LogError($"[RLAgent] logFile is null! Message: {message}");
+                return;
+            }
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            string goName = "null_gameObject";
+            try
+            {
+                if (gameObject != null)
+                    goName = gameObject.name;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[RLAgent] Exception accessing gameObject.name: {ex.Message}");
+            }
+            string logMessage = $"[{timestamp}] [{goName}] {message}";
+            try
+            {
+                logFile.WriteLine(logMessage);
+                logFile.Flush();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[RLAgent] Exception writing to logFile: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[RLAgent] Exception in Log (outer catch): {ex.Message}\n{ex.StackTrace}");
+        }
     }
 
     // Add this new method to check if a position is valid

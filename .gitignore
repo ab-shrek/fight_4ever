@@ -1,13 +1,13 @@
 [Ll]ibrary/
 [Tt]emp/
 [Oo]bj/
-[B]uild/
+[Bb]uild/
 [Bb]uilds/
 [Ll]ogs/
 [Mm]emoryCaptures/
+Fight4Ever.app/
 *.csproj
 *.unityproj
-*.sln
 *.user
 *.pidb
 *.booproj
