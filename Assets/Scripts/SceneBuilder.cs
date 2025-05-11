@@ -3,9 +3,24 @@ using System.Collections.Generic;
 using TMPro;
 using UnityEngine.UI;
 using System.Linq;
+using Unity.Barracuda;
+using System;
+using System.IO;
+using System.Collections;
+using UnityEngine.Networking;
 
 public class SceneBuilder : MonoBehaviour
 {
+    [SerializeField] private float maxHealth = 100f;
+    [SerializeField] private float mapWidth = 30f;
+    [SerializeField] private float mapLength = 20f;
+    [SerializeField] private float coverHeight = 2f;
+    [SerializeField] private float coverWidth = 2f;
+    [SerializeField] private float coverLength = 2f;
+    [SerializeField] private int numCovers = 5;
+    [SerializeField] private float marginX = 20f;
+    [SerializeField] private float marginY = 20f;
+
     // Health and score system
     private Dictionary<GameObject, float> playerHealth = new Dictionary<GameObject, float>();
     private Dictionary<GameObject, int> playerScore = new Dictionary<GameObject, int>();
@@ -13,69 +28,57 @@ public class SceneBuilder : MonoBehaviour
     private Dictionary<GameObject, TextMeshProUGUI> playerScoreUI = new Dictionary<GameObject, TextMeshProUGUI>();
     private Dictionary<GameObject, int> playerWins = new Dictionary<GameObject, int>();
     private Dictionary<GameObject, TextMeshProUGUI> playerWinsUI = new Dictionary<GameObject, TextMeshProUGUI>();
-    private float maxHealth = 100f;
     private bool isGameOver = false;
+    private StreamWriter logFile;
+    private string instanceId;
+
+    void Awake()
+    {
+    }
 
     void Start()
     {
-        // Main ground
-        GameObject ground = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        ground.transform.position = new Vector3(0, 0, 0);
-        ground.transform.localScale = new Vector3(30, 1, 20);
-        ground.name = "Ground";
-        // Load ground material from Resources
-        Material groundMat = Resources.Load<Material>("GroundMat");
-        ground.GetComponent<Renderer>().material = groundMat;
-
-        // DrawGridLines(30, 20, 1f);
-        CreatePlayerZones();
-        SetupLighting();
-        SetupCamera();
-        SetupUI();
-
-        // Create enclosing walls
-        CreateEnclosingWalls();
-
-        // Check MAP_TYPE environment variable for cover creation
-        string mapTypeEnv = System.Environment.GetEnvironmentVariable("MAP_TYPE");
-        if (string.IsNullOrEmpty(mapTypeEnv) || mapTypeEnv.ToLower() == "default")
+        try
         {
-            Debug.Log("[SceneBuilder] MAP_TYPE is 'default' or not set: No covers will be created.");
+            // Set up bullet prefab first
+            SetupBulletPrefab();
+
+            // Use absolute path for logs
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            string logPath = Path.Combine(projectRoot, "training", "build", "logs");
+            Directory.CreateDirectory(logPath);
+            string logFilePath = Path.Combine(logPath, $"scene_builder_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+            logFile = new StreamWriter(logFilePath, true);
+            instanceId = System.Environment.GetEnvironmentVariable("INSTANCE_ID") ?? "unknown";
+            Log("SceneBuilder initialized");
+
+            CreateGround();
+            CreateWalls();
+            CreateCovers();
+            CreatePlayers();
+            DrawGridLines(mapWidth, mapLength, 1f);
         }
-        else
+        catch (Exception e)
         {
-            Debug.Log($"[SceneBuilder] MAP_TYPE is '{mapTypeEnv}': Creating covers.");
-            // Center cover
-            CreateCover(new Vector3(0, 2, 0), new Vector3(1f, 4, 6), "CenterCover");
-            // Left side cover
-            CreateCover(new Vector3(-8, 2, 4), new Vector3(1f, 4, 4), "LeftCover1");
-            CreateCover(new Vector3(-8, 2, -4), new Vector3(1f, 4, 4), "LeftCover2");
-            // Right side cover
-            CreateCover(new Vector3(8, 2, 4), new Vector3(1f, 4, 4), "RightCover1");
-            CreateCover(new Vector3(8, 2, -4), new Vector3(1f, 4, 4), "RightCover2");
+            Debug.LogError($"[SceneBuilder] Error in Start: {e.Message}\n{e.StackTrace}");
         }
+    }
 
-        // Players - spawning behind walls, facing towards center
-        var player1 = CreatePlayer(new Vector3(-13, 1, 4), Quaternion.Euler(0, 0, 0), "Player_1", Color.blue);
-        var player2 = CreatePlayer(new Vector3(13, 1, -4), Quaternion.Euler(0, 0, 0), "Player_2", Color.red);
-        // Register health and score for each player
-        playerHealth[player1] = maxHealth;
-        playerHealth[player2] = maxHealth;
-        playerScore[player1] = 0;
-        playerScore[player2] = 0;
-        playerWins[player1] = 0;  // Initialize wins for player 1
-        playerWins[player2] = 0;  // Initialize wins for player 2
-        // Improved UI placement: top left and top right
-        CreatePlayerUI(player1, new Vector2(0f, 1f), TextAlignmentOptions.TopLeft); // Top left
-        CreatePlayerUI(player2, new Vector2(1f, 1f), TextAlignmentOptions.TopRight); // Top right
-
-        // Set up RLAgent opponent references
-        var agent1 = player1.GetComponent<RLAgent>();
-        var agent2 = player2.GetComponent<RLAgent>();
-        if (agent1 != null && agent2 != null)
+    private void Log(string message)
+    {
+        if (logFile != null)
         {
-            agent1.opponentAgent = agent2;
-            agent2.opponentAgent = agent1;
+            try
+            {
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                string logMessage = $"[{timestamp}] [Instance:{instanceId}] {message}";
+                logFile.WriteLine(logMessage);
+                logFile.Flush();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[SceneBuilder] Failed to write to log: {e.Message}");
+            }
         }
     }
 
@@ -127,203 +130,155 @@ public class SceneBuilder : MonoBehaviour
         go.layer = LayerMask.NameToLayer("Grid");
     }
 
-    void CreatePlayerZones()
+    void CreateGround()
     {
-        float width = 30f, length = 20f;
-        float zoneWidth = 6f;
-        CreateZone(new Vector3(-width/2 + zoneWidth/2, 0.51f, 0), new Vector3(zoneWidth, 1.02f, length), new Color(0.2f, 0.4f, 1f, 0.18f));
-        CreateZone(new Vector3(width/2 - zoneWidth/2, 0.51f, 0), new Vector3(zoneWidth, 1.02f, length), new Color(1f, 0.4f, 0.2f, 0.18f));
+        GameObject ground = GameObject.CreatePrimitive(PrimitiveType.Plane);
+        ground.transform.localScale = new Vector3(mapWidth/10f, 1, mapLength/10f);
+        ground.name = "Ground";
+        Log("Ground created");
     }
 
-    void CreateZone(Vector3 pos, Vector3 scale, Color color)
+    void CreateWalls()
     {
-        var zone = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        zone.transform.position = pos;
-        zone.transform.localScale = scale;
-        Material zoneMat = Resources.Load<Material>("ZoneMat");
-        zone.GetComponent<Renderer>().material = zoneMat;
-    }
-
-    void SetupLighting()
-    {
-        var lightGO = new GameObject("Directional Light");
-        var light = lightGO.AddComponent<Light>();
-        light.type = LightType.Directional;
-        light.color = Color.white;
-        light.intensity = 1.2f;
-        light.shadows = LightShadows.Soft;
-        lightGO.transform.rotation = Quaternion.Euler(50, -30, 0);
-        RenderSettings.ambientLight = new Color(0.2f, 0.2f, 0.3f);
-    }
-
-    void SetupCamera()
-    {
-        Camera cam = Camera.main;
-        if (cam == null)
-        {
-            var camGO = new GameObject("Main Camera");
-            cam = camGO.AddComponent<Camera>();
-            cam.tag = "MainCamera";
-        }
-
-        // Use orthographic for a board-game look and better screen fill
-        cam.orthographic = true;
-        cam.orthographicSize = 11; // Adjust this value until the arena fills the screen nicely
-        cam.transform.position = new Vector3(0, 30, 0);
-        cam.transform.rotation = Quaternion.Euler(90, 0, 0);
-        cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = new Color(0.12f, 0.12f, 0.12f);
-    }
-
-    void SetupUI()
-    {
-        var canvasGO = new GameObject("Canvas");
-        var canvas = canvasGO.AddComponent<UnityEngine.Canvas>();
-        canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-        canvasGO.AddComponent<UnityEngine.UI.CanvasScaler>();
-        canvasGO.AddComponent<UnityEngine.UI.GraphicRaycaster>();
-
-        // Remove central score/time UI
-        // var textGO = new GameObject("ScoreText");
-        // textGO.transform.SetParent(canvasGO.transform);
-        // var text = textGO.AddComponent<TMPro.TextMeshProUGUI>();
-        // text.text = "Score: 0 | Time: 00:00";
-        // text.fontSize = 48;
-        // text.alignment = TMPro.TextAlignmentOptions.Center;
-        // text.color = Color.white;
-        // var rect = text.GetComponent<RectTransform>();
-        // rect.anchorMin = new Vector2(0.5f, 1f);
-        // rect.anchorMax = new Vector2(0.5f, 1f);
-        // rect.pivot = new Vector2(0.5f, 1f);
-        // rect.anchoredPosition = new Vector2(0, -40);
-        // rect.sizeDelta = new Vector2(600, 100);
-        // textGO.AddComponent<UITimer>();
-    }
-
-    void CreateEnclosingWalls()
-    {
-        // Wall dimensions
         float wallHeight = 5f;
         float wallThickness = 1f;
-        float mapWidth = 30f;
-        float mapLength = 20f;
-
-        // Remove creation of new material
-        // Create walls and store them for damage
-        List<GameObject> walls = new List<GameObject>();
 
         // North wall
-        var northWall = CreateWall(new Vector3(0, wallHeight/2, mapLength/2), 
-                  new Vector3(mapWidth + wallThickness*2, wallHeight, wallThickness),
-                  "NorthWall");
-        walls.Add(northWall);
+        CreateWall(new Vector3(0, wallHeight/2, mapLength/2), new Vector3(mapWidth, wallHeight, wallThickness), "NorthWall");
         // South wall
-        var southWall = CreateWall(new Vector3(0, wallHeight/2, -mapLength/2), 
-                  new Vector3(mapWidth + wallThickness*2, wallHeight, wallThickness),
-                  "SouthWall");
-        walls.Add(southWall);
+        CreateWall(new Vector3(0, wallHeight/2, -mapLength/2), new Vector3(mapWidth, wallHeight, wallThickness), "SouthWall");
         // East wall
-        var eastWall = CreateWall(new Vector3(mapWidth/2, wallHeight/2, 0), 
-                  new Vector3(wallThickness, wallHeight, mapLength),
-                  "EastWall");
-        walls.Add(eastWall);
+        CreateWall(new Vector3(mapWidth/2, wallHeight/2, 0), new Vector3(wallThickness, wallHeight, mapLength), "EastWall");
         // West wall
-        var westWall = CreateWall(new Vector3(-mapWidth/2, wallHeight/2, 0), 
-                  new Vector3(wallThickness, wallHeight, mapLength),
-                  "WestWall");
-        walls.Add(westWall);
+        CreateWall(new Vector3(-mapWidth/2, wallHeight/2, 0), new Vector3(wallThickness, wallHeight, mapLength), "WestWall");
+        Log("Walls created");
     }
 
-    GameObject CreateWall(Vector3 position, Vector3 scale, string name)
+    void CreateWall(Vector3 position, Vector3 size, string name)
     {
         GameObject wall = GameObject.CreatePrimitive(PrimitiveType.Cube);
         wall.transform.position = position;
-        wall.transform.localScale = scale;
+        wall.transform.localScale = size;
         wall.name = name;
-        Material wallMat = Resources.Load<Material>("WallMat");
-        wall.GetComponent<Renderer>().material = wallMat;
-
-        // Add Rigidbody and make it kinematic (static)
-        Rigidbody rb = wall.AddComponent<Rigidbody>();
-        rb.isKinematic = true; // Make it static
-        rb.useGravity = false; // No gravity needed
-        rb.constraints = RigidbodyConstraints.FreezeAll; // Prevent any movement
-
-        // Ensure proper collider
-        BoxCollider collider = wall.GetComponent<BoxCollider>();
-        collider.isTrigger = false;
-        collider.size = scale;
-        collider.center = Vector3.zero;
-
-        return wall;
     }
 
-    void CreateCover(Vector3 position, Vector3 scale, string name)
+    void CreateCovers()
+    {
+        for (int i = 0; i < numCovers; i++)
+        {
+            float x = UnityEngine.Random.Range(-mapWidth/2 + coverWidth, mapWidth/2 - coverWidth);
+            float z = UnityEngine.Random.Range(-mapLength/2 + coverLength, mapLength/2 - coverLength);
+            CreateCover(new Vector3(x, coverHeight/2, z));
+        }
+        Log($"Created {numCovers} covers");
+    }
+
+    void CreateCover(Vector3 position)
     {
         GameObject cover = GameObject.CreatePrimitive(PrimitiveType.Cube);
         cover.transform.position = position;
-        cover.transform.localScale = scale;
-        cover.name = name;
-        Material coverMat = Resources.Load<Material>("CoverMat");
-        cover.GetComponent<Renderer>().material = coverMat;
-
-        // Add Rigidbody and make it kinematic (static)
-        Rigidbody rb = cover.AddComponent<Rigidbody>();
-        rb.isKinematic = true; // Make it static
-        rb.useGravity = false; // No gravity needed
-        rb.constraints = RigidbodyConstraints.FreezeAll; // Prevent any movement
-
-        // Ensure the cover has a proper collider
-        BoxCollider collider = cover.GetComponent<BoxCollider>();
-        collider.isTrigger = false; // Make sure it's not a trigger
-        collider.center = Vector3.zero; // Center the collider
+        cover.transform.localScale = new Vector3(coverWidth, coverHeight, coverLength);
+        cover.name = "Cover";
     }
 
-    GameObject CreatePlayer(Vector3 position, Quaternion rotation, string name, Color color)
+    void CreatePlayers()
     {
-        GameObject player = AISetup.CreateAICharacter(position, rotation, name);
-        Transform visual = player.transform.GetChild(0);
-        if (visual != null)
+        // Create canvas for UI
+        GameObject canvas = new GameObject("Canvas");
+        canvas.AddComponent<Canvas>().renderMode = RenderMode.ScreenSpaceOverlay;
+        canvas.AddComponent<UnityEngine.UI.CanvasScaler>();
+        canvas.AddComponent<UnityEngine.UI.GraphicRaycaster>();
+
+        // Create players
+        GameObject player1 = AISetup.CreateAICharacter(new Vector3(-5, 1, 0), Quaternion.identity, "Player1");
+        GameObject player2 = AISetup.CreateAICharacter(new Vector3(5, 1, 0), Quaternion.identity, "Player2");
+
+        // Set up RLAgent for player1
+        RLAgent agent1 = player1.GetComponent<RLAgent>();
+        if (agent1 != null)
         {
-            visual.GetComponent<Renderer>().material.color = color;
+            agent1.IsPlayerOne = true;
         }
 
-        // Set isPlayerOne based on the player's name
-        var rlAgent = player.GetComponent<RLAgent>();
-        if (rlAgent != null)
+        // Set up RLAgent for player2
+        RLAgent agent2 = player2.GetComponent<RLAgent>();
+        if (agent2 != null)
         {
-            rlAgent.IsPlayerOne = (name == "Player_1");
+            agent2.IsPlayerOne = false;
         }
 
-        return player;
+        // Pass log file to AIShooting components
+        AIShooting shooting1 = player1.GetComponent<AIShooting>();
+        if (shooting1 != null)
+        {
+            shooting1.SetLogFile(logFile);
+            Log($"Set up logging for Player1's AIShooting component");
+        }
+
+        AIShooting shooting2 = player2.GetComponent<AIShooting>();
+        if (shooting2 != null)
+        {
+            shooting2.SetLogFile(logFile);
+            Log($"Set up logging for Player2's AIShooting component");
+        }
+
+        // Set up bullet prefab logging
+        GameObject bulletPrefab = Resources.Load<GameObject>("Bullet");
+        if (bulletPrefab != null)
+        {
+            Bullet bulletComponent = bulletPrefab.GetComponent<Bullet>();
+            if (bulletComponent != null)
+            {
+                bulletComponent.SetLogFile(logFile);
+                Log("Set up logging for Bullet prefab");
+            }
+        }
+
+        // Initialize health and score
+        playerHealth[player1] = maxHealth;
+        playerHealth[player2] = maxHealth;
+        playerScore[player1] = 0;
+        playerScore[player2] = 0;
+        playerWins[player1] = 0;
+        playerWins[player2] = 0;
+
+        // Create UI
+        CreatePlayerUI(player1, new Vector2(0f, 1f), TextAlignmentOptions.TopLeft);
+        CreatePlayerUI(player2, new Vector2(1f, 1f), TextAlignmentOptions.TopRight);
+
+        // Set up RLAgent opponent references
+        if (agent1 != null && agent2 != null)
+        {
+            agent1.opponentAgent = agent2;
+            agent2.opponentAgent = agent1;
+        }
+
+        Log("Players created and initialized");
     }
 
     void CreatePlayerUI(GameObject player, Vector2 anchor, TextAlignmentOptions alignment)
     {
-        var canvas = FindFirstObjectByType<Canvas>();
+        GameObject canvas = GameObject.Find("Canvas");
         if (canvas == null) return;
-
-        float marginX = 120f;
-        float marginY = -120f;
 
         // Health UI
         var healthGO = new GameObject(player.name + "_HealthUI");
         healthGO.transform.SetParent(canvas.transform);
         var healthText = healthGO.AddComponent<TextMeshProUGUI>();
         healthText.fontSize = 28;
-        healthText.color = Color.cyan;
+        healthText.color = Color.red;
         healthText.alignment = alignment;
-        var rect = healthGO.GetComponent<RectTransform>();
-        rect.anchorMin = anchor;
-        rect.anchorMax = anchor;
+        var rect1 = healthGO.GetComponent<RectTransform>();
+        rect1.anchorMin = anchor;
+        rect1.anchorMax = anchor;
         if (alignment == TextAlignmentOptions.TopRight) {
-            rect.pivot = new Vector2(1f, 1f);
-            rect.anchoredPosition = new Vector2(-marginX-90f, marginY);
+            rect1.pivot = new Vector2(1f, 1f);
+            rect1.anchoredPosition = new Vector2(-marginX, marginY);
         } else {
-            rect.pivot = new Vector2(0f, 1f);
-            rect.anchoredPosition = new Vector2(marginX, marginY);
+            rect1.pivot = new Vector2(0f, 1f);
+            rect1.anchoredPosition = new Vector2(marginX, marginY);
         }
-        rect.sizeDelta = new Vector2(200, 40);
+        rect1.sizeDelta = new Vector2(200, 40);
         playerHealthUI[player] = healthText;
 
         // Score UI
@@ -367,6 +322,7 @@ public class SceneBuilder : MonoBehaviour
         playerWinsUI[player] = winsText;
 
         UpdatePlayerUI(player);
+        Log($"Created UI for {player.name}");
     }
 
     void UpdatePlayerUI(GameObject player)
@@ -382,17 +338,16 @@ public class SceneBuilder : MonoBehaviour
     void RestartGame()
     {
         isGameOver = false;
-        // Reset health for all players
         foreach (var player in playerHealth.Keys.ToList())
         {
             playerHealth[player] = maxHealth;
             playerScore[player] = 0;
             UpdatePlayerUI(player);
         }
+        Log("Game restarted");
     }
 
-    // Update OnPlayerHit to handle game over and restart
-    public void OnPlayerHit(GameObject player, float damage)
+    public void OnPlayerHit(GameObject player, float damage, Vector3 hitPosition)
     {
         if (playerHealth.ContainsKey(player) && !isGameOver)
         {
@@ -400,7 +355,8 @@ public class SceneBuilder : MonoBehaviour
             if (playerHealth[player] < 0) playerHealth[player] = 0;
             UpdatePlayerUI(player);
 
-            Debug.Log($"{player.name} took {damage} damage. Health: {playerHealth[player]}");
+            Log($"{player.name} took {damage} damage. Health: {playerHealth[player]}");
+            
             // Award point to the other player on every hit
             GameObject opponent = null;
             foreach (var p in playerHealth.Keys)
@@ -409,23 +365,134 @@ public class SceneBuilder : MonoBehaviour
             {
                 playerScore[opponent]++;
                 UpdatePlayerUI(opponent);
+                Log($"{opponent.name} scored a point. New score: {playerScore[opponent]}");
             }
 
             if (playerHealth[player] <= 0)
             {
                 isGameOver = true;
-                Debug.Log($"{player.name} is defeated!");
+                Log($"{player.name} is defeated!");
                 
                 // Award win to the opponent
                 if (opponent != null)
                 {
                     playerWins[opponent]++;
                     UpdatePlayerUI(opponent);
+                    Log($"{opponent.name} wins the match! Final score - Health: {playerHealth[opponent]}, Score: {playerScore[opponent]}, Wins: {playerWins[opponent]}");
                 }
 
-                // Restart the game after a short delay
-                Invoke("RestartGame", 3f);
+                // End the game instance after a short delay
+                Invoke("QuitApplication", 3f);
             }
+
+            // Send accuracy information to training server
+            var accuracyData = new
+            {
+                player_id = player.name == "Player1" ? 1 : 2,
+                hit = true,
+                damage = damage,
+                position = new { x = hitPosition.x, y = hitPosition.y, z = hitPosition.z }
+            };
+
+            StartCoroutine(SendAccuracyData(accuracyData));
+        }
+    }
+
+    private IEnumerator SendAccuracyData(object accuracyData)
+    {
+        string jsonData = JsonUtility.ToJson(accuracyData);
+        using (UnityWebRequest www = UnityWebRequest.PostWwwForm("http://localhost:5000/accuracy", "POST"))
+        {
+            byte[] bodyRaw = System.Text.Encoding.UTF8.GetBytes(jsonData);
+            www.uploadHandler = new UploadHandlerRaw(bodyRaw);
+            www.downloadHandler = new DownloadHandlerBuffer();
+            www.SetRequestHeader("Content-Type", "application/json");
+            yield return www.SendWebRequest();
+            
+            if (www.result != UnityWebRequest.Result.Success)
+            {
+                Debug.LogError($"Error sending accuracy data: {www.error}");
+            }
+        }
+    }
+
+    private void OnPlayerMiss(Vector3 missPosition)
+    {
+        // Send miss information to training server
+        var accuracyData = new
+        {
+            player_id = 0,
+            hit = false,
+            damage = 0f,
+            position = new { x = missPosition.x, y = missPosition.y, z = missPosition.z }
+        };
+
+        StartCoroutine(SendAccuracyData(accuracyData));
+    }
+
+    private void QuitApplication()
+    {
+        Log("Ending game instance...");
+        #if UNITY_EDITOR
+            UnityEditor.EditorApplication.isPlaying = false;
+        #else
+            Application.Quit();
+        #endif
+    }
+
+    void OnDestroy()
+    {
+        logFile?.Close();
+        logFile = null;
+    }
+
+    private void SetupBulletPrefab()
+    {
+        try
+        {
+            // Create bullet prefab if it doesn't exist
+            GameObject bulletPrefab = Resources.Load<GameObject>("Prefabs/Bullet");
+            if (bulletPrefab == null)
+            {
+                // Create a new bullet GameObject
+                GameObject bullet = new GameObject("Bullet");
+                
+                // Add components
+                bullet.AddComponent<Bullet>();
+                bullet.AddComponent<SphereCollider>();
+                
+                // Set up transform
+                bullet.transform.localScale = new Vector3(0.2f, 0.2f, 0.2f);
+                
+                // Set up collider
+                SphereCollider collider = bullet.GetComponent<SphereCollider>();
+                collider.radius = 0.2f;
+                collider.isTrigger = true;
+                
+                // Set up Bullet component
+                Bullet bulletComponent = bullet.GetComponent<Bullet>();
+                bulletComponent.speed = 20f;
+                bulletComponent.damage = 10f;
+                
+                // Create Resources/Prefabs directory if it doesn't exist
+                string prefabsPath = "Assets/Resources/Prefabs";
+                if (!Directory.Exists(prefabsPath))
+                {
+                    Directory.CreateDirectory(prefabsPath);
+                }
+                
+                // Save as prefab
+                #if UNITY_EDITOR
+                UnityEditor.PrefabUtility.SaveAsPrefabAsset(bullet, "Assets/Resources/Prefabs/Bullet.prefab");
+                DestroyImmediate(bullet);
+                #endif
+                
+                Log("Created Bullet prefab");
+            }
+        }
+        catch (Exception e)
+        {
+            Debug.LogError($"[SceneBuilder] Error setting up bullet prefab: {e.Message}\n{e.StackTrace}");
         }
     }
 }

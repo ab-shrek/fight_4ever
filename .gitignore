@@ -1,9 +1,9 @@
 [Ll]ibrary/
 [Tt]emp/
+[Ll]ogs/
 [Oo]bj/
 [Bb]uild/
 [Bb]uilds/
-[Ll]ogs/
 [Mm]emoryCaptures/
 Fight4Ever.app/
 *.csproj
@@ -19,3 +19,6 @@ Fight4Ever.app/
 *.xcuserstate
 mlagents-env/
 mlagents-env39/
+.git/
+server.log
+training_server.log

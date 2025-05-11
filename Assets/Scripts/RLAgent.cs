@@ -1,59 +1,85 @@
 using UnityEngine;
-using Unity.MLAgents;
-using Unity.MLAgents.Sensors;
-using Unity.MLAgents.Actuators;
 using System;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
-using System.Threading.Tasks;
-using Newtonsoft.Json;
-using System.Collections.Generic;
 using System.IO;
+using System.Collections.Generic;
+using Unity.Barracuda;
+using System.Collections;
+using UnityEngine.Networking;
 
-public class RLAgent : Agent
+public class RLAgent : MonoBehaviour
 {
-    [SerializeField] private bool useRemoteTraining = true;
-    [SerializeField] private string serverIP = "localhost";
-    [SerializeField] private int serverPort = 5000;  // Default port
-    [SerializeField] private bool isPlayerOne = true;  // New field to identify which player this is
     [SerializeField] private float movementSpeed = 7f;
     [SerializeField] private float explorationReward = 0.01f;
     [SerializeField] private float stagnationPenalty = 0.005f;
-    public bool IsPlayerOne 
-    { 
-        get => isPlayerOne;
-        set 
-        { 
-            isPlayerOne = value;
-            // Update port when isPlayerOne changes
-            serverPort = isPlayerOne ? 5000 : 5001;
-        }
-    }
-    
-    private TcpClient client;
-    private NetworkStream stream;
-    private bool isConnected = false;
-    private bool isConnecting = false;
-    private float lastConnectionAttempt = 0f;
-    private float connectionRetryInterval = 5f; // Retry connection every 5 seconds
+    public bool IsPlayerOne { get; set; }
+
+    [Header("Barracuda Model")]
+    public NNModel nnModelAsset;
+
+    [Header("Server Communication")]
+    public string serverUrl = "http://localhost:5000/get_action"; // Default to player 1 port
+    private bool isServerConnected = false;
+    private float[] lastAction = new float[3]; // Store last action for debugging
+    private int playerId; // Store the player ID
+    private float requestTimeout = 1.0f; // 1 second timeout for requests
+    private float decisionInterval = 1.0f; // 1 second between decisions
+
     private Rigidbody rb;
     private AIShooting shooting;
     public RLAgent opponentAgent;
     private HealthSystem healthSystem;
     private StreamWriter logFile;
-    private float lastRequestTime = 0f;
-    private float requestInterval = 0.1f; // 100ms between requests
     private Vector3 lastPosition;
     private float lastPositionTime;
-    private float positionCheckInterval = 1f; // Check position every second
+    private float positionCheckInterval = 1f;
     private HashSet<Vector2Int> visitedPositions = new HashSet<Vector2Int>();
-    private double lastServerRequestTimestamp = 0;
     private string instanceId;
 
-    protected override void Awake()
+    private float lastDecisionTime = 0f;
+
+    [Header("Game Settings")]
+    [SerializeField] private float gameDuration = 120f; // 2 minutes in seconds
+    private float gameStartTime;
+
+    private float lastHealth;
+    private float lastOpponentHealth;
+    private Vector3 lastOpponentPosition;
+    private bool isDead = false;
+
+    // RL specific fields
+    private NeuralNetworkModel model;
+    private ReplayBuffer buffer;
+    private AdamOptimizer optimizer;
+    private float epsilon;
+    private float epsilonDecay;
+    private float epsilonMin;
+    private float gamma;
+    private int batchSize;
+    private float[] lastState;
+    private float lastReward;
+    private AIShooting shootingComponent;
+
+    [System.Serializable]
+    private class RewardData
     {
-        base.Awake();
+        public string instance_id;
+        public float reward;
+        public float[] next_state;
+        public bool done;
+        public int player_id;
+    }
+
+    [System.Serializable]
+    private class ActionRequest
+    {
+        public float[] observation;
+        public string instance_id;
+        public int player_id;
+    }
+
+    void Awake()
+    {
+        Log($"[RLAgent] Awake called for {gameObject.name}");
         rb = GetComponent<Rigidbody>();
         shooting = GetComponent<AIShooting>();
         healthSystem = GetComponent<HealthSystem>();
@@ -69,34 +95,59 @@ public class RLAgent : Agent
     {
         try
         {
-            // Use a relative path for logs directory
-            string logPath = Path.Combine(Application.dataPath, "../training/build/logs");
+            // Use absolute path for logs
+            string projectRoot = Path.GetDirectoryName(Application.dataPath);
+            string logPath = Path.Combine(projectRoot, "training", "build", "logs");
             Directory.CreateDirectory(logPath);
-            // Create new log file with player name
-            string logFile = Path.Combine(logPath, $"agent_{gameObject.name}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
-            this.logFile = new StreamWriter(logFile, true);
-            // Only log after logFile is assigned
-            Log($"Log file created at: {logFile}");
-            Log("Components initialized");
-
-            if (useRemoteTraining)
+            string logFilePath = Path.Combine(logPath, $"rl_agent_{gameObject.name}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+            logFile = new StreamWriter(logFilePath, true);
+            instanceId = System.Environment.GetEnvironmentVariable("INSTANCE_ID") ?? "unknown";
+            
+            // Share log file with AIShooting component
+            if (shooting != null)
             {
-                Log($"useRemoteTraining is true, isPlayerOne: {isPlayerOne}");
-                int port = isPlayerOne ? 5000 : 5001;
-                Log($"Connecting to training server on port {port}");
-                _ = ConnectToTrainingServer(port);
+                shooting.SetLogFile(logFile);
+                Log($"[{gameObject.name}] Shared log file with AIShooting component");
+                
+                // Set up shooting
+                if (opponentAgent != null)
+                {
+                    shooting.SetTarget(opponentAgent.gameObject);
+                    shooting.StartShooting();
+                    Log($"[{gameObject.name}] Set up shooting against opponent: {opponentAgent.gameObject.name}");
+                }
+                else
+                {
+                    Log($"[{gameObject.name}] Warning: No opponent agent found for shooting setup");
+                }
             }
             else
             {
-                Log("Not using remote training");
+                Log($"[{gameObject.name}] Warning: AIShooting component not found");
             }
             
-            // Request initial decision
-            Log("Requesting initial decision");
-            RequestDecision();
-            Log("Start method completed");
+            // Set player ID based on IsPlayerOne
+            playerId = IsPlayerOne ? 1 : 2;
+            Log($"[{gameObject.name}] Initializing RL Agent as Player {playerId}");
 
-            instanceId = System.Environment.GetEnvironmentVariable("INSTANCE_ID") ?? gameObject.name;
+            // Initialize the model
+            model = new NeuralNetworkModel();
+            model.Initialize();
+            Log($"[{gameObject.name}] Neural network model initialized");
+
+            // Initialize the buffer
+            buffer = new ReplayBuffer(10000);
+            Log($"[{gameObject.name}] Replay buffer initialized with capacity 10000");
+
+            // Initialize the optimizer
+            optimizer = new AdamOptimizer(0.001f);
+            Log($"[{gameObject.name}] Optimizer initialized");
+
+            // Check server connection
+            StartCoroutine(CheckServerConnection());
+
+            // Start training loop
+            StartCoroutine(TrainingLoop());
         }
         catch (Exception e)
         {
@@ -104,437 +155,367 @@ public class RLAgent : Agent
         }
     }
 
-    private void Update()
+    private IEnumerator CheckServerConnection()
     {
-        if (logFile == null) return;
-        if (useRemoteTraining)
+        string healthUrl = serverUrl.Replace("/get_action", "/health");
+        Log($"Checking server connection at {healthUrl} for Player {playerId}");
+        
+        using (var uwr = new UnityWebRequest(healthUrl, "GET"))
         {
-            float currentTime = Time.time;
-            
-            // Check connection status and attempt reconnection if needed
-            if (!isConnected && !isConnecting && currentTime - lastConnectionAttempt >= connectionRetryInterval)
-            {
-                Log("Connection lost, attempting to reconnect");
-                int port = isPlayerOne ? 5000 : 5001;
-                _ = ConnectToTrainingServer(port);
-            }
+            uwr.downloadHandler = new DownloadHandlerBuffer();
+            yield return uwr.SendWebRequest();
 
-            if (isConnected && currentTime - lastRequestTime >= requestInterval)
+            if (uwr.result == UnityWebRequest.Result.Success)
             {
-                Log($"Update calling SendObservationsAndGetActions - Time: {currentTime}, Frame: {Time.frameCount}, Client Connected: {client?.Connected}");
-                SendObservationsAndGetActions();
-                Log($"Update calling RequestDecision - Time: {currentTime}, Frame: {Time.frameCount}, Client Connected: {client?.Connected}");
-                RequestDecision();
-                lastRequestTime = currentTime;
+                try
+                {
+                    var response = JsonUtility.FromJson<HealthResponse>(uwr.downloadHandler.text);
+                    if (response.status == "healthy")
+                    {
+                        isServerConnected = true;
+                        Log($"Server connection established for Player {playerId}");
+                    }
+                    else
+                    {
+                        Log($"Server reported unhealthy status: {response.status}");
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log($"Error parsing health response: {e.Message}");
+                }
+            }
+            else
+            {
+                Log($"Failed to connect to server: {uwr.error}");
             }
         }
+    }
 
-        // Check for exploration rewards
+    [System.Serializable]
+    private class HealthResponse
+    {
+        public string status;
+        public int port;
+        public int buffer_size;
+        public int total_steps;
+        public bool gpu_enabled;
+    }
+
+    void Update()
+    {
+        if (logFile == null)
+        {
+            Log($"Log file is null for {gameObject.name}");
+            return;
+        }
+
+        // Check if game time has elapsed
+        if (Time.time - gameStartTime >= gameDuration)
+        {
+            Log("Game time elapsed - Quitting application");
+            #if UNITY_EDITOR
+                UnityEditor.EditorApplication.isPlaying = false;
+            #else
+                Application.Quit();
+            #endif
+            return;
+        }
+
+        // Calculate and send rewards
+        CalculateAndSendRewards();
+        
         float checkTime = Time.time;
         if (checkTime - lastPositionTime >= positionCheckInterval)
         {
             CheckExploration();
             lastPositionTime = checkTime;
         }
+        
+        if (Time.time - lastDecisionTime >= decisionInterval)
+        {
+            TakeAction();
+            lastDecisionTime = Time.time;
+        }
     }
 
-    private async Task ConnectToTrainingServer(int port)
+    private void CalculateAndSendRewards()
     {
-        if (isConnecting)
+        if (!isServerConnected || isDead) return;
+
+        float currentHealth = healthSystem != null ? healthSystem.GetHealthPercentage() : 1f;
+        float currentOpponentHealth = opponentAgent != null && opponentAgent.healthSystem != null ? 
+            opponentAgent.healthSystem.GetHealthPercentage() : 1f;
+        Vector3 currentOpponentPosition = opponentAgent != null ? opponentAgent.transform.position : Vector3.zero;
+
+        float reward = 0f;
+
+        // Health change reward
+        float healthChange = currentHealth - lastHealth;
+        reward += healthChange * 10f; // Positive reward for health gain, negative for health loss
+
+        // Opponent health change reward
+        float opponentHealthChange = lastOpponentHealth - currentOpponentHealth;
+        reward += opponentHealthChange * 15f; // Positive reward for damaging opponent
+
+        // Distance to opponent reward
+        float currentDistance = Vector3.Distance(transform.position, currentOpponentPosition);
+        float lastDistance = Vector3.Distance(transform.position, lastOpponentPosition);
+        float distanceChange = lastDistance - currentDistance;
+        reward += distanceChange * 0.1f; // Small reward for getting closer to opponent
+
+        // Update last values
+        lastHealth = currentHealth;
+        lastOpponentHealth = currentOpponentHealth;
+        lastOpponentPosition = currentOpponentPosition;
+
+        // Send reward to server
+        StartCoroutine(SendRewardToServer(reward));
+    }
+
+    private IEnumerator SendRewardToServer(float reward)
+    {
+        string rewardUrl = serverUrl.Replace("/get_action", "/update_reward");
+        Log($"Sending reward to server at {rewardUrl} for Player {playerId}");
+        float startTime = Time.realtimeSinceStartup;
+        
+        var rewardData = new RewardData
         {
-            Log("Already attempting to connect, skipping connection attempt");
+            instance_id = instanceId,
+            reward = reward,
+            next_state = GetCurrentState(),
+            done = isDead,
+            player_id = playerId
+        };
+
+        string jsonPayload = JsonUtility.ToJson(rewardData);
+        Log($"Reward payload for Player {playerId}: {jsonPayload}");
+
+        using (var uwr = new UnityWebRequest(rewardUrl, "POST"))
+        {
+            byte[] jsonToSend = new System.Text.UTF8Encoding().GetBytes(jsonPayload);
+            uwr.uploadHandler = new UploadHandlerRaw(jsonToSend);
+            uwr.downloadHandler = new DownloadHandlerBuffer();
+            uwr.SetRequestHeader("Content-Type", "application/json");
+
+            Log($"Sending reward request to {rewardUrl}");
+            yield return uwr.SendWebRequest();
+
+            float endTime = Time.realtimeSinceStartup;
+            float requestTime = (endTime - startTime) * 1000f; // Convert to milliseconds
+
+            if (uwr.result != UnityWebRequest.Result.Success)
+            {
+                Log($"Failed to send reward to server: {uwr.error} (took {requestTime:F2}ms)");
+                Log($"Request URL: {rewardUrl}");
+                Log($"Request payload: {jsonPayload}");
+                Log($"Response code: {uwr.responseCode}");
+                Log($"Response: {uwr.downloadHandler.text}");
+            }
+            else
+            {
+                Log($"Successfully sent reward to server. Response: {uwr.downloadHandler.text} (took {requestTime:F2}ms)");
+            }
+        }
+    }
+
+    private void TakeAction()
+    {
+        if (!isServerConnected)
+        {
+            Log($"Server not connected for {gameObject.name}");
             return;
         }
-
-        float currentTime = Time.time;
-        if (currentTime - lastConnectionAttempt < connectionRetryInterval)
-        {
-            Log("Too soon to retry connection");
-            return;
-        }
-
-        isConnecting = true;
-        lastConnectionAttempt = currentTime;
 
         try
         {
-            Log($"Connecting to training server on port {port}...");
-            client = new TcpClient();
-            await client.ConnectAsync(serverIP, port);
-            stream = client.GetStream();
-            isConnected = true;
-            Log($"Connected to training server on port {port}");
+            float[] obs = GetCurrentState();
+            Log($"Current state: [{string.Join(", ", obs)}]");
             
-            // Add a small delay to ensure server is ready
-            await Task.Delay(100);
-            
-            // Send initial observation immediately after connection
-            SendObservationsAndGetActions();
+            StartCoroutine(GetActionFromServer(obs));
         }
         catch (Exception e)
         {
-            Log($"Failed to connect to training server: {e.Message}");
-            isConnected = false;
-        }
-        finally
-        {
-            isConnecting = false;
+            Log($"Error in TakeAction: {e.Message}\n{e.StackTrace}");
         }
     }
 
-    public override void Initialize()
+    private IEnumerator GetActionFromServer(float[] observation)
     {
-        // Initialize components
-        rb = GetComponent<Rigidbody>();
-        shooting = GetComponent<AIShooting>();
-        healthSystem = GetComponent<HealthSystem>();
+        Log($"Getting action from server at {serverUrl} for Player {playerId}");
+        float startTime = Time.realtimeSinceStartup;
         
-        // Configure behavior parameters
-        var behaviorParameters = GetComponent<Unity.MLAgents.Policies.BehaviorParameters>();
-        if (behaviorParameters != null)
+        var requestData = new ActionRequest
         {
-            // Set vector observation space size to 6 (1 health + 2 position + 1 opponent health + 2 opponent position)
-            behaviorParameters.BrainParameters.VectorObservationSize = 6;
-            // Set continuous action space size to 3 (2 for movement, 1 for shooting)
-            behaviorParameters.BrainParameters.ActionSpec = Unity.MLAgents.Actuators.ActionSpec.MakeContinuous(3);
+            observation = observation,
+            instance_id = instanceId,
+            player_id = playerId
+        };
+        string jsonPayload = JsonUtility.ToJson(requestData);
+        Log($"Action request payload for Player {playerId}: {jsonPayload}");
+
+        using (var uwr = new UnityWebRequest(serverUrl, "POST"))
+        {
+            byte[] jsonToSend = new System.Text.UTF8Encoding().GetBytes(jsonPayload);
+            uwr.uploadHandler = new UploadHandlerRaw(jsonToSend);
+            uwr.downloadHandler = new DownloadHandlerBuffer();
+            uwr.SetRequestHeader("Content-Type", "application/json");
+            uwr.timeout = Mathf.RoundToInt(requestTimeout * 1000); // Set timeout in milliseconds
+
+            Log($"Sending action request to {serverUrl}");
+            yield return uwr.SendWebRequest();
+
+            float endTime = Time.realtimeSinceStartup;
+            float requestTime = (endTime - startTime) * 1000f; // Convert to milliseconds
+
+            if (uwr.result != UnityWebRequest.Result.Success)
+            {
+                Log($"Failed to get action from server: {uwr.error} (took {requestTime:F2}ms)");
+                Log($"Request URL: {serverUrl}");
+                Log($"Request payload: {jsonPayload}");
+                Log($"Response code: {uwr.responseCode}");
+                Log($"Response: {uwr.downloadHandler.text}");
+                // Fallback to random action if server fails
+                lastAction[0] = UnityEngine.Random.Range(-1f, 1f);
+                lastAction[1] = UnityEngine.Random.Range(-1f, 1f);
+                lastAction[2] = UnityEngine.Random.value;
+            }
+            else
+            {
+                try
+                {
+                    var response = JsonUtility.FromJson<ActionResponse>(uwr.downloadHandler.text);
+                    float[] action = response.action;
+                    
+                    if (action == null || action.Length < 2)
+                    {
+                        Log("Invalid action received from server");
+                        yield break;
+                    }
+
+                    Log($"Action received from server: [{string.Join(", ", action)}] (took {requestTime:F2}ms)");
+                    lastAction = action;
+                    
+                    // Movement actions are in [-1, 1] range from tanh
+                    float moveX = Mathf.Clamp(action[0], -1f, 1f);
+                    float moveZ = Mathf.Clamp(action[1], -1f, 1f);
+                    
+                    // Shooting action is in [0, 1] range from sigmoid
+                    float shoot = Mathf.Clamp(action[2], 0f, 1f);
+                    
+                    Vector3 move = new Vector3(moveX, 0, moveZ).normalized * movementSpeed;
+                    
+                    if (rb != null)
+                    {
+                        rb.linearVelocity = move;
+                        if (move != Vector3.zero)
+                        {
+                            transform.rotation = Quaternion.LookRotation(move);
+                        }
+                    }
+                    
+                    // Use threshold for shooting (0.5 means shoot when action > 0.5)
+                    if (shoot > 0.5f && shooting != null)
+                    {
+                        shooting.Shoot();
+                    }
+                }
+                catch (Exception e)
+                {
+                    Log($"Error processing server response: {e.Message}\n{e.StackTrace}");
+                }
+            }
         }
     }
 
-    public override void CollectObservations(VectorSensor sensor)
+    [System.Serializable]
+    private class ActionResponse
     {
-        // Observe own health (normalized)
-        sensor.AddObservation(healthSystem != null ? healthSystem.GetHealthPercentage() : 1f);
-        // Observe own position
-        sensor.AddObservation(transform.position.x / 15f); // Normalize to map size
-        sensor.AddObservation(transform.position.z / 10f);
-        // Observe opponent's health and position
+        public float[] action;
+    }
+
+    private float[] GetCurrentState()
+    {
+        float[] state = new float[6];
+        state[0] = healthSystem != null ? healthSystem.GetHealthPercentage() : 1f;
+        state[1] = transform.position.x / 15f;  // Normalize position to [-1, 1] range
+        state[2] = transform.position.z / 10f;
         if (opponentAgent != null)
         {
-            sensor.AddObservation(opponentAgent.healthSystem != null ? opponentAgent.healthSystem.GetHealthPercentage() : 1f);
-            sensor.AddObservation(opponentAgent.transform.position.x / 15f);
-            sensor.AddObservation(opponentAgent.transform.position.z / 10f);
+            state[3] = opponentAgent.healthSystem != null ? opponentAgent.healthSystem.GetHealthPercentage() : 1f;
+            state[4] = opponentAgent.transform.position.x / 15f;
+            state[5] = opponentAgent.transform.position.z / 10f;
         }
         else
         {
-            // If no opponent, add default values
-            sensor.AddObservation(1f); // Default opponent health
-            sensor.AddObservation(0f); // Default opponent x position
-            sensor.AddObservation(0f); // Default opponent z position
+            state[3] = 1f;
+            state[4] = 0f;
+            state[5] = 0f;
         }
-        // Do NOT add instanceId here (must be float)
+        return state;
     }
 
-    public override void OnActionReceived(ActionBuffers actions)
+    private void CheckExploration()
     {
-        Log($"OnActionReceived - Time: {Time.time}, Frame: {Time.frameCount}, Client Connected: {client?.Connected}");
+        // Check for stagnation
+        if (Vector3.Distance(transform.position, lastPosition) < 0.1f)
+        {
+            // Apply stagnation penalty
+            StartCoroutine(SendRewardToServer(-stagnationPenalty));
+            Log($"Applied stagnation penalty: {-stagnationPenalty}");
+        }
+
+        // Check for exploration
+        Vector2Int currentPos = new Vector2Int(
+            Mathf.RoundToInt(transform.position.x),
+            Mathf.RoundToInt(transform.position.z)
+        );
         
-        if (useRemoteTraining)
+        if (!visitedPositions.Contains(currentPos))
         {
-            Log($"useRemoteTraining is true, isConnected: {isConnected}, Client Connected: {client?.Connected}");
-            if (isConnected)
-            {
-                Log("Connected to server, sending observations...");
-                SendObservationsAndGetActions();
-            }
-            else
-            {
-                Log("Not connected to training server, using default actions");
-                ApplyDefaultAction();
-            }
-        }
-        else
-        {
-            Log("Using local ML-Agents actions");
-            float moveX = Mathf.Clamp(actions.ContinuousActions[0], -1f, 1f);
-            float moveZ = Mathf.Clamp(actions.ContinuousActions[1], -1f, 1f);
-            float shoot = actions.ContinuousActions.Length > 2 ? actions.ContinuousActions[2] : 0f;
-
-            Vector3 move = new Vector3(moveX, 0, moveZ) * movementSpeed * Time.deltaTime;
-            if (rb != null)
-            {
-                Vector3 newPosition = transform.position + move;
-                if (IsValidPosition(newPosition))
-                {
-                    rb.MovePosition(newPosition);
-                    if (move != Vector3.zero)
-                    {
-                        transform.rotation = Quaternion.LookRotation(move);
-                    }
-                }
-                else
-                {
-                    AddReward(-0.01f);
-                }
-            }
-            if (shoot > 0.5f && shooting != null)
-            {
-                shooting.Shoot();
-            }
-            AddReward(0.001f);
-        }
-    }
-
-    private async void SendObservationsAndGetActions()
-    {
-        if (!isConnected) 
-        {
-            Log("SendObservationsAndGetActions: Not connected, returning");
-            return;
+            // Apply exploration reward
+            StartCoroutine(SendRewardToServer(explorationReward));
+            visitedPositions.Add(currentPos);
+            Log($"Applied exploration reward: {explorationReward} at position {currentPos}");
         }
 
-        try
-        {
-            Log($"SendObservationsAndGetActions: Starting - Client Connected: {client?.Connected}");
-            // Create observation dictionary
-            var observation = new Dictionary<string, object>
-            {
-                { "health", healthSystem != null ? healthSystem.GetHealthPercentage() : 1f },
-                { "position", new float[] { transform.position.x / 15f, transform.position.z / 10f } },
-                { "opponent_health", opponentAgent?.healthSystem != null ? opponentAgent.healthSystem.GetHealthPercentage() : 1f },
-                { "opponent_position", opponentAgent != null ? new float[] { opponentAgent.transform.position.x / 15f, opponentAgent.transform.position.z / 10f } : new float[] { 0, 0 } },
-                { "instance_id", instanceId }
-            };
-
-            Log($"Sending observation: {JsonConvert.SerializeObject(observation)}");
-
-            // Check if connection is still valid
-            if (!client?.Connected ?? true)
-            {
-                Log("Connection lost, attempting to reconnect");
-                isConnected = false;
-                int port = isPlayerOne ? 5000 : 5001;
-                await ConnectToTrainingServer(port);
-                if (!isConnected) return;
-            }
-
-            // Before sending observation
-            lastServerRequestTimestamp = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds;
-
-            // Serialize and send observation
-            string jsonObservation = JsonConvert.SerializeObject(observation);
-            byte[] data = Encoding.UTF8.GetBytes(jsonObservation + "\n");
-            await stream.WriteAsync(data, 0, data.Length);
-            await stream.FlushAsync();
-            Log("Sent observation to server");
-
-            // Read response with timeout
-            byte[] buffer = new byte[4096];
-            int bytesRead = 0;
-            try
-            {
-                stream.ReadTimeout = 1000; // 1 second timeout
-                bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length);
-            }
-            catch (Exception e)
-            {
-                Log($"Timeout reading from server: {e.Message}");
-                ApplyDefaultAction();
-                return;
-            }
-
-            string response = Encoding.UTF8.GetString(buffer, 0, bytesRead).Trim();
-            Log($"Received response: {response}");
-            
-            if (string.IsNullOrEmpty(response))
-            {
-                Log("Received empty response from server");
-                ApplyDefaultAction();
-                return;
-            }
-
-            var action = JsonConvert.DeserializeObject<Dictionary<string, object>>(response);
-            if (action == null)
-            {
-                Log($"Failed to parse action from response: {response}");
-                ApplyDefaultAction();
-                return;
-            }
-
-            // Apply actions
-            float[] movement = ((Newtonsoft.Json.Linq.JArray)action["movement"]).ToObject<float[]>();
-            bool shoot = (bool)action["attack"];
-
-            Vector3 move = new Vector3(movement[0], 0, movement[1]) * 5f * Time.deltaTime;
-            Log($"Applying movement: {move}");
-            
-            if (rb != null)
-            {
-                rb.MovePosition(transform.position + move);
-                if (move != Vector3.zero)
-                {
-                    transform.rotation = Quaternion.LookRotation(move);
-                }
-            }
-
-            if (shoot && shooting != null)
-            {
-                Log("Shooting!");
-                shooting.Shoot();
-            }
-
-            // After receiving response
-            double now = DateTime.UtcNow.Subtract(DateTime.UnixEpoch).TotalMilliseconds;
-            double lagMs = now - lastServerRequestTimestamp;
-            Log($"Server response lag: {lagMs} ms | Instance: {instanceId}");
-        }
-        catch (Exception e)
-        {
-            Log($"Error communicating with training server: {e.Message}");
-            Log(e.ToString());
-            isConnected = false;
-            ApplyDefaultAction();
-        }
-    }
-
-    private void ApplyDefaultAction()
-    {
-        if (rb != null)
-        {
-            // Generate random movement direction with increased magnitude
-            float randomX = UnityEngine.Random.Range(-1f, 1f);
-            float randomZ = UnityEngine.Random.Range(-1f, 1f);
-            Vector3 move = new Vector3(randomX, 0, randomZ) * 10f * Time.deltaTime; // Increased movement speed
-            
-            Vector3 newPosition = transform.position + move;
-            // Check if new position would be valid
-            if (IsValidPosition(newPosition))
-            {
-                rb.MovePosition(newPosition);
-                Log($"Applied random movement: {move}, New position: {newPosition}");
-                if (move != Vector3.zero)
-                {
-                    transform.rotation = Quaternion.LookRotation(move);
-                }
-            }
-            else
-            {
-                // Try a different random direction if blocked
-                randomX = UnityEngine.Random.Range(-1f, 1f);
-                randomZ = UnityEngine.Random.Range(-1f, 1f);
-                move = new Vector3(randomX, 0, randomZ) * 10f * Time.deltaTime;
-                newPosition = transform.position + move;
-                
-                if (IsValidPosition(newPosition))
-                {
-                    rb.MovePosition(newPosition);
-                    Log($"Applied alternative random movement: {move}, New position: {newPosition}");
-                    if (move != Vector3.zero)
-                    {
-                        transform.rotation = Quaternion.LookRotation(move);
-                    }
-                }
-                else
-                {
-                    // Small penalty for being stuck
-                    AddReward(-0.01f);
-                    Log($"WARNING: Blocked movement in both directions. Current position: {transform.position}");
-                }
-            }
-
-            // Random shooting (50% chance)
-            if (shooting != null && UnityEngine.Random.value > 0.5f)
-            {
-                Log("Random shooting!");
-                shooting.Shoot();
-            }
-        }
-        else
-        {
-            Log("Rigidbody is null!");
-        }
+        // Update last position for next check
+        lastPosition = transform.position;
     }
 
     public void OnHit(float damage)
     {
-        AddReward(-0.2f); // Negative reward for being hit
+        Log($"Agent hit for {damage}");
     }
 
     public void OnHitOpponent()
     {
-        AddReward(0.5f); // Reward for hitting opponent
+        Log($"Agent hit opponent");
     }
 
     private void OnAgentDeath()
     {
-        SetReward(-1.0f);
-        EndEpisode();
-        if (opponentAgent != null)
-        {
-            opponentAgent.SetReward(1.0f);
-            opponentAgent.EndEpisode();
-        }
+        Log($"Agent died");
+        isDead = true;
+        // Send final reward
+        StartCoroutine(SendRewardToServer(-10f)); // Penalty for dying
     }
 
-    void OnDestroy()
-    {
-        if (isConnected)
-        {
-            stream?.Close();
-            client?.Close();
-        }
-        logFile?.Close();
-        logFile = null;
-    }
-
-    private void Log(string message)
-    {
-        try
-        {
-            if (logFile == null)
-            {
-                Debug.LogError($"[RLAgent] logFile is null! Message: {message}");
-                return;
-            }
-            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
-            string goName = "null_gameObject";
-            try
-            {
-                if (gameObject != null)
-                    goName = gameObject.name;
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[RLAgent] Exception accessing gameObject.name: {ex.Message}");
-            }
-            string logMessage = $"[{timestamp}] [{goName}] {message}";
-            try
-            {
-                logFile.WriteLine(logMessage);
-                logFile.Flush();
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError($"[RLAgent] Exception writing to logFile: {ex.Message}");
-            }
-        }
-        catch (Exception ex)
-        {
-            Debug.LogError($"[RLAgent] Exception in Log (outer catch): {ex.Message}\n{ex.StackTrace}");
-        }
-    }
-
-    // Add this new method to check if a position is valid
     private bool IsValidPosition(Vector3 newPosition)
     {
-        // Get the bounds of the arena
-        float mapWidth = 15f;  // Half of 30
-        float mapLength = 10f; // Half of 20
-        
-        // Check if the new position is within bounds
-        bool isWithinBounds = 
-            newPosition.x > -mapWidth && 
-            newPosition.x < mapWidth && 
-            newPosition.z > -mapLength && 
+        float mapWidth = 15f;
+        float mapLength = 10f;
+        bool isWithinBounds =
+            newPosition.x > -mapWidth &&
+            newPosition.x < mapWidth &&
+            newPosition.z > -mapLength &&
             newPosition.z < mapLength;
-        
         if (!isWithinBounds)
         {
             Log($"Position out of bounds: {newPosition}. Bounds: X[{-mapWidth}, {mapWidth}], Z[{-mapLength}, {mapLength}]");
             return false;
         }
-        
-        // Check for collisions with walls using Physics.CheckSphere
-        float radius = 0.5f; // Adjust this value based on your agent's size
+        float radius = 0.5f;
         bool hasCollision = Physics.CheckSphere(newPosition, radius, LayerMask.GetMask("Default"));
         if (hasCollision)
         {
@@ -543,37 +524,45 @@ public class RLAgent : Agent
         return !hasCollision;
     }
 
-    private void CheckExploration()
+    void OnDestroy()
     {
-        // Convert current position to grid coordinates (rounded to nearest meter)
-        Vector2Int currentGridPos = new Vector2Int(
-            Mathf.RoundToInt(transform.position.x),
-            Mathf.RoundToInt(transform.position.z)
-        );
-
-        // If this is a new position, give exploration reward
-        if (visitedPositions.Add(currentGridPos))
-        {
-            AddReward(explorationReward);
-            Log($"Exploration reward: {explorationReward} at position {currentGridPos}");
-        }
-
-        // Check if agent is stuck in same area
-        float distanceMoved = Vector3.Distance(transform.position, lastPosition);
-        if (distanceMoved < 0.5f)
-        {
-            AddReward(-stagnationPenalty);
-            Log($"Stagnation penalty: {-stagnationPenalty} - Distance moved: {distanceMoved}");
-        }
-
-        lastPosition = transform.position;
+        logFile?.Close();
+        logFile = null;
+        isServerConnected = false;
     }
 
-    public override void OnEpisodeBegin()
+    private void Log(string message)
     {
-        // Reset visited positions when episode starts
-        visitedPositions.Clear();
-        lastPosition = transform.position;
-        lastPositionTime = Time.time;
+        if (logFile != null)
+        {
+            try
+            {
+                string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+                string logMessage = $"[{timestamp}] [Instance:{instanceId}] {message}";
+                logFile.WriteLine(logMessage);
+                logFile.Flush();
+            }
+            catch (Exception e)
+            {
+                Debug.LogError($"[RLAgent] Failed to write to log: {e.Message}");
+            }
+        }
+    }
+
+    private IEnumerator TrainingLoop()
+    {
+        while (true)
+        {
+            yield return new WaitForSeconds(decisionInterval);
+            if (!isDead)
+            {
+                TakeAction();
+            }
+        }
+    }
+
+    private float[] GetState()
+    {
+        return GetCurrentState();
     }
 } 

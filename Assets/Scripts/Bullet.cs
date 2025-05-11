@@ -1,29 +1,56 @@
 using UnityEngine;
+using System;
+using System.IO;
 
 public class Bullet : MonoBehaviour
 {
-    [SerializeField] private float speed = 20f;
-    [SerializeField] private float damage = 10f;
+    [SerializeField] public float speed = 20f;
+    [SerializeField] public float damage = 10f;
     public GameObject shooter;
-
+    private string instanceId;
     private Vector3 startPosition;
     private Vector3 direction;
     private const float MAX_DISTANCE = 100f;
+    private StreamWriter logFile;
+
+    public void SetLogFile(StreamWriter file)
+    {
+        logFile = file;
+        Log("Log file set");
+    }
 
     private void Start()
     {
-        startPosition = transform.position;
-        direction = transform.forward;
-        
-        // Add collider if it doesn't exist
-        if (GetComponent<SphereCollider>() == null)
+        try
         {
-            SphereCollider collider = gameObject.AddComponent<SphereCollider>();
-            collider.radius = 0.2f;
-            collider.isTrigger = true;
+            instanceId = System.Environment.GetEnvironmentVariable("INSTANCE_ID") ?? "unknown";
+            startPosition = transform.position;
+            direction = transform.forward;
+            Log($"Created at position {transform.position}");
+            
+            // Add collider if it doesn't exist
+            if (GetComponent<SphereCollider>() == null)
+            {
+                SphereCollider collider = gameObject.AddComponent<SphereCollider>();
+                collider.radius = 0.2f;
+                collider.isTrigger = true;
+            }
         }
-        
-        Debug.Log($"[Bullet {gameObject.GetInstanceID()}] Created at position {transform.position}");
+        catch (Exception e)
+        {
+            Debug.LogError($"[Bullet] Error in Start: {e.Message}\n{e.StackTrace}");
+        }
+    }
+
+    private void Log(string message)
+    {
+        string fullMessage = $"[Bullet {gameObject.GetInstanceID()}] {message} | Shooter: {(shooter != null ? shooter.name : "Unknown")}";
+        if (logFile != null)
+        {
+            logFile.WriteLine($"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {fullMessage}");
+            logFile.Flush();
+        }
+        Debug.Log(fullMessage);
     }
 
     private void Update()
@@ -32,10 +59,16 @@ public class Bullet : MonoBehaviour
         float moveDistance = speed * Time.deltaTime;
         transform.position += direction * moveDistance;
 
+        // Log position every second
+        if (Time.frameCount % 60 == 0)  // Assuming 60 FPS
+        {
+            Log($"Current position: {transform.position}, Distance from start: {Vector3.Distance(startPosition, transform.position):F2}");
+        }
+
         // Check max distance
         if (Vector3.Distance(startPosition, transform.position) > MAX_DISTANCE)
         {
-            Debug.Log($"[Bullet {gameObject.GetInstanceID()}] Destroyed due to max distance reached");
+            Log("Destroyed due to max distance reached");
             Destroy(gameObject);
         }
     }
@@ -44,18 +77,21 @@ public class Bullet : MonoBehaviour
     {
         // Ignore collisions with other bullets or the shooter
         if (other.gameObject == shooter || other.GetComponent<Bullet>() != null)
+        {
+            Log($"Ignoring collision with {(other.gameObject == shooter ? "shooter" : "other bullet")}: {other.gameObject.name}");
             return;
+        }
 
         // Check if we hit a cover
         if (other.gameObject.name.Contains("Cover"))
         {
             var coverCollider = other.GetComponent<Collider>();
-            Debug.Log($"[Bullet {gameObject.GetInstanceID()}] Hit cover {other.gameObject.name} at position {transform.position} | Shooter: {(shooter != null ? shooter.name : "Unknown")} | Cover bounds center: {coverCollider.bounds.center}, size: {coverCollider.bounds.size}");
+            Log($"Hit cover {other.gameObject.name} at position {transform.position} | Cover bounds center: {coverCollider.bounds.center}, size: {coverCollider.bounds.size}");
             Destroy(gameObject);
             return;
         }
 
-        Debug.Log($"[Bullet {gameObject.GetInstanceID()}] Hit {other.gameObject.name} at position {transform.position} | Shooter: {(shooter != null ? shooter.name : "Unknown")}");
+        Log($"Hit {other.gameObject.name} at position {transform.position}");
         HandleHit(other.gameObject);
     }
 
@@ -65,7 +101,7 @@ public class Bullet : MonoBehaviour
         SceneBuilder sceneBuilder = FindFirstObjectByType<SceneBuilder>();
         if (sceneBuilder != null)
         {
-            sceneBuilder.OnPlayerHit(hitObject, damage);
+            sceneBuilder.OnPlayerHit(hitObject, damage, transform.position);
         }
 
         // RLAgent reward logic
@@ -74,16 +110,25 @@ public class Bullet : MonoBehaviour
         {
             hitAgent.OnHit(damage);
         }
-        if (shooter != null)
-        {
-            RLAgent shooterAgent = shooter.GetComponent<RLAgent>();
-            if (shooterAgent != null)
-            {
-                shooterAgent.OnHitOpponent();
-            }
-        }
 
-        Debug.Log($"[Bullet {gameObject.GetInstanceID()}] Shooter: {(shooter != null ? shooter.name : "Unknown")} hit target: {hitObject.name}");
+        Log($"Hit target: {hitObject.name}");
         Destroy(gameObject);
+    }
+
+    private void OnCollisionEnter(Collision collision)
+    {
+        GameObject hitObject = collision.gameObject;
+        Log($"Hit target: {hitObject.name}");
+        Destroy(gameObject);
+    }
+
+    private void OnDestroy()
+    {
+        if (logFile != null)
+        {
+            Log("Bullet destroyed");
+            logFile.Close();
+            logFile = null;
+        }
     }
 } 
