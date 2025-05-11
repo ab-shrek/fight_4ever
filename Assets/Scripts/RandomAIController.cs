@@ -1,4 +1,6 @@
 using UnityEngine;
+using System;
+using System.IO;
 
 public class RandomAIController : MonoBehaviour
 {
@@ -15,84 +17,105 @@ public class RandomAIController : MonoBehaviour
     private float nextDirectionChange;
     private float nextShootTime;
     private AIShooting shootingComponent;
+    private Rigidbody rb;
+    private Vector2 currentDirection;
+    private float lastDirectionChangeTime;
+    private float lastShootTime;
+    private StreamWriter logFile;
 
     private void Start()
     {
-        Debug.Log($"[{gameObject.name}] Initializing AI Controller");
-        startPosition = transform.position;
-        Debug.Log($"[{gameObject.name}] Start Position: {startPosition}");
-        
-        nextDirectionChange = Time.time + changeDirectionInterval;
-        nextShootTime = Time.time + shootInterval;
-        
-        shootingComponent = GetComponent<AIShooting>();
-        if (shootingComponent == null)
+        try
         {
-            Debug.LogError($"[{gameObject.name}] AIShooting component not found!");
+            string logPath = Path.Combine(Application.dataPath, "../training/build/logs");
+            Directory.CreateDirectory(logPath);
+            string logFilePath = Path.Combine(logPath, $"random_ai_{gameObject.name}_{DateTime.Now:yyyyMMdd_HHmmss}.log");
+            logFile = new StreamWriter(logFilePath, true);
+            Log($"[{gameObject.name}] Initializing AI Controller");
+            startPosition = transform.position;
+            Log($"[{gameObject.name}] Start Position: {startPosition}");
+            
+            nextDirectionChange = Time.time + changeDirectionInterval;
+            nextShootTime = Time.time + shootInterval;
+            
+            shootingComponent = GetComponent<AIShooting>();
+            if (shootingComponent == null)
+            {
+                Log($"[{gameObject.name}] AIShooting component not found!");
+                return;
+            }
+            Log($"[{gameObject.name}] AIShooting component found");
+            
+            rb = GetComponent<Rigidbody>();
+            if (rb == null)
+            {
+                rb = gameObject.AddComponent<Rigidbody>();
+                rb.constraints = RigidbodyConstraints.FreezeRotation | RigidbodyConstraints.FreezePositionY;
+            }
+            
+            SetNewRandomTarget();
         }
-        else
+        catch (Exception e)
         {
-            Debug.Log($"[{gameObject.name}] AIShooting component found");
+            Debug.LogError($"[RandomAIController] Error in Start: {e.Message}\n{e.StackTrace}");
         }
-        
-        SetNewRandomTarget();
     }
 
     private void Update()
     {
-        // Random movement
-        if (Time.time >= nextDirectionChange)
+        if (Time.time - lastDirectionChangeTime > changeDirectionInterval)
         {
-            Debug.Log($"[{gameObject.name}] Changing direction. Current position: {transform.position}");
-            SetNewRandomTarget();
-            nextDirectionChange = Time.time + changeDirectionInterval;
+            Log($"[{gameObject.name}] Changing direction. Current position: {transform.position}");
+            ChangeDirection();
+            lastDirectionChangeTime = Time.time;
         }
-
-        // Move towards target
-        Vector3 direction = (targetPosition - transform.position).normalized;
-        Vector3 movement = direction * moveSpeed * Time.deltaTime;
         
-        // Calculate new position
-        Vector3 newPosition = transform.position + movement;
+        Move();
         
-        // Clamp position within map boundaries
-        newPosition.x = Mathf.Clamp(newPosition.x, -MAP_WIDTH, MAP_WIDTH);
-        newPosition.z = Mathf.Clamp(newPosition.z, -MAP_LENGTH, MAP_LENGTH);
-        
-        // Apply movement
-        transform.position = newPosition;
-        
-        // Debug movement
-        if (movement.magnitude > 0.01f)
+        if (Time.time - lastShootTime > shootInterval)
         {
-            Debug.Log($"[{gameObject.name}] Moving: {movement.magnitude:F2} units. Position: {transform.position}");
+            Log($"[{gameObject.name}] Shooting!");
+            Shoot();
+            lastShootTime = Time.time;
         }
+    }
 
-        // Look in movement direction
-        if (direction != Vector3.zero)
+    private void Move()
+    {
+        if (rb != null)
         {
-            transform.rotation = Quaternion.LookRotation(direction);
+            Vector3 movement = new Vector3(currentDirection.x, 0, currentDirection.y).normalized * moveSpeed;
+            rb.linearVelocity = movement;
+            Log($"[{gameObject.name}] Moving: {movement.magnitude:F2} units. Position: {transform.position}");
         }
+    }
 
-        // Random shooting
-        if (Time.time >= nextShootTime)
+    private void ChangeDirection()
+    {
+        currentDirection = new Vector2(
+            UnityEngine.Random.Range(-1f, 1f),
+            UnityEngine.Random.Range(-1f, 1f)
+        ).normalized;
+        
+        targetPosition = transform.position + new Vector3(currentDirection.x, 0, currentDirection.y) * changeDirectionInterval;
+        Log($"[{gameObject.name}] New target position: {targetPosition}");
+    }
+
+    private void Shoot()
+    {
+        if (shootingComponent != null)
         {
-            if (shootingComponent != null)
-            {
-                Debug.Log($"[{gameObject.name}] Shooting!");
-                shootingComponent.Shoot();
-            }
-            nextShootTime = Time.time + shootInterval;
+            shootingComponent.Shoot();
         }
     }
 
     private void SetNewRandomTarget()
     {
         // Generate random position within map boundaries
-        float randomX = Random.Range(-MAP_WIDTH, MAP_WIDTH);
-        float randomZ = Random.Range(-MAP_LENGTH, MAP_LENGTH);
+        float randomX = UnityEngine.Random.Range(-MAP_WIDTH, MAP_WIDTH);
+        float randomZ = UnityEngine.Random.Range(-MAP_LENGTH, MAP_LENGTH);
         targetPosition = new Vector3(randomX, transform.position.y, randomZ);
-        Debug.Log($"[{gameObject.name}] New target position: {targetPosition}");
+        Log($"[{gameObject.name}] New target position: {targetPosition}");
     }
 
     private void OnDrawGizmos()
@@ -109,5 +132,48 @@ public class RandomAIController : MonoBehaviour
         // Draw path to target
         Gizmos.color = Color.blue;
         Gizmos.DrawLine(transform.position, targetPosition);
+    }
+
+    private void OnDestroy()
+    {
+        logFile?.Close();
+        logFile = null;
+    }
+
+    private void Log(string message)
+    {
+        try
+        {
+            if (logFile == null)
+            {
+                Debug.LogError($"[RandomAIController] logFile is null! Message: {message}");
+                return;
+            }
+            string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
+            string goName = "null_gameObject";
+            try
+            {
+                if (gameObject != null)
+                    goName = gameObject.name;
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[RandomAIController] Exception accessing gameObject.name: {ex.Message}");
+            }
+            string logMessage = $"[{timestamp}] [{goName}] {message}";
+            try
+            {
+                logFile.WriteLine(logMessage);
+                logFile.Flush();
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError($"[RandomAIController] Exception writing to logFile: {ex.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogError($"[RandomAIController] Exception in Log (outer catch): {ex.Message}\n{ex.StackTrace}");
+        }
     }
 } 

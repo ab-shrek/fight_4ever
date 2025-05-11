@@ -1,4 +1,5 @@
 using UnityEngine;
+using UnityEngine.Rendering;
 
 public class AISetup : MonoBehaviour
 {
@@ -7,6 +8,43 @@ public class AISetup : MonoBehaviour
     [SerializeField] private float bulletLifetime = 3f;
     [SerializeField] private float bulletDamage = 10f;
     [SerializeField] private Vector3 firePointOffset = new Vector3(0, 1, 1);
+
+    private void Awake()
+    {
+        // Check if running in headless mode
+        if (Application.isBatchMode)
+        {
+            Debug.Log("Running in headless mode - configuring minimal graphics settings");
+            
+            // Disable cameras and renderers
+            var cameras = FindObjectsByType<Camera>(FindObjectsSortMode.None);
+            foreach (var camera in cameras)
+            {
+                camera.enabled = false;
+            }
+
+            var renderers = FindObjectsByType<Renderer>(FindObjectsSortMode.None);
+            foreach (var renderer in renderers)
+            {
+                renderer.enabled = false;
+            }
+
+            // Set quality level to lowest
+            QualitySettings.SetQualityLevel(0);
+            
+            // Disable shadows
+            QualitySettings.shadows = ShadowQuality.Disable;
+            
+            // Disable anti-aliasing
+            QualitySettings.antiAliasing = 0;
+            
+            // Disable vsync
+            QualitySettings.vSyncCount = 0;
+            
+            // Set target frame rate
+            Application.targetFrameRate = 60;
+        }
+    }
 
     private void Start()
     {
@@ -49,14 +87,8 @@ public class AISetup : MonoBehaviour
         // Setup the AI
         setup.SetupAI();
 
-        // Add RLAgent for ML-Agents
+        // Add RLAgent for Barracuda-based RL
         RLAgent rlAgent = aiCharacter.AddComponent<RLAgent>();
-
-        // Add and configure BehaviorParameters programmatically
-        var behaviorParams = aiCharacter.AddComponent<Unity.MLAgents.Policies.BehaviorParameters>();
-        behaviorParams.BehaviorName = "RLAgent";
-        behaviorParams.BrainParameters.ActionSpec = Unity.MLAgents.Actuators.ActionSpec.MakeContinuous(3); // moveX, moveZ, shoot
-        behaviorParams.BehaviorType = Unity.MLAgents.Policies.BehaviorType.Default;
 
         return aiCharacter;
     }

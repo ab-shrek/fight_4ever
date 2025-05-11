@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.IO;
 
 public class AIShooting : MonoBehaviour
 {
@@ -11,6 +12,12 @@ public class AIShooting : MonoBehaviour
     private float nextFireTime;
     private GameObject bulletPrefab;
     private Transform firePoint;
+    private StreamWriter logFile;
+
+    public void SetLogFile(StreamWriter logFile)
+    {
+        this.logFile = logFile;
+    }
 
     private void Awake()
     {
@@ -61,11 +68,15 @@ public class AIShooting : MonoBehaviour
             GameObject bullet = Instantiate(bulletPrefab, firePoint.position, firePoint.rotation);
             bullet.SetActive(true);
 
-            // Set shooter reference for RL
+            // Set shooter reference and log file for RL
             Bullet bulletScript = bullet.GetComponent<Bullet>();
             if (bulletScript != null)
             {
                 bulletScript.shooter = this.gameObject;
+                if (logFile != null)
+                {
+                    bulletScript.SetLogFile(logFile);
+                }
             }
 
             // Set next fire time

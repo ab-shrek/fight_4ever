@@ -33,6 +33,8 @@ public class Builder
         );
     }
 
+    // Original BuildLinux method
+    /*
     public static void BuildLinux()
     {
         string buildPath = Directory.GetCurrentDirectory();
@@ -41,6 +43,26 @@ public class Builder
             Path.Combine(buildPath, "Fight4Ever.x86_64"),
             BuildTarget.StandaloneLinux64,
             BuildOptions.None
+        );
+    }
+    */
+
+    // New BuildLinux method with headless mode options
+    public static void BuildLinux()
+    {
+        string buildPath = Directory.GetCurrentDirectory();
+        
+        // Define build options for headless mode
+        BuildOptions buildOptions = BuildOptions.EnableHeadlessMode | 
+                                  BuildOptions.Development | 
+                                  BuildOptions.AllowDebugging;
+        
+        // Build the game
+        BuildPipeline.BuildPlayer(
+            EditorBuildSettings.scenes,
+            Path.Combine(buildPath, "Fight4Ever.x86_64"),
+            BuildTarget.StandaloneLinux64,
+            buildOptions
         );
     }
 } 

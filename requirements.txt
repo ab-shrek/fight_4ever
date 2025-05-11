@@ -1,0 +1,7 @@
+flask
+requests
+torch
+numpy 
+psutil
+gunicorn
+gevent
